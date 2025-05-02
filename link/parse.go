@@ -22,7 +22,8 @@ func Parse(r io.Reader) ([]Link, error) {
 
 	nodes := linkNodes(doc)
 
-	var links []Link
+	links := make([]Link, 0, len(nodes))
+
 	for _, node := range nodes {
 		links = append(links, buildLink(node))
 	}

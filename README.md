@@ -84,4 +84,3 @@ Since the output is printed to standard output, you can redirect it to a file:
 - Add support for `<lastmod>`, `<changefreq>`, and `<priority>` tags in the sitemap XML.
 - More sophisticated error handling (e.g., retries, handling specific HTTP errors).
 - Option to specify an output file path via a command-line flag
-- Add testing for link package
