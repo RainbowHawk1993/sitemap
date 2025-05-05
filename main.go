@@ -10,6 +10,8 @@ import (
 	"sitemap/link"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"time"
 )
 
 // Define the XML structure for the sitemap
@@ -64,12 +66,35 @@ func buildSitemap(startURL string, maxDepth int) ([]string, error) {
 	finalURLs := []string{startURL}
 	visited.Store(startURL, true)
 
+	var scannedCount atomic.Int64
+	var addedCount atomic.Int64
+	var queuedCount atomic.Int64
+
+	// Stats display goroutine
+	stopStats := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(1 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				fmt.Printf("\rScanned: %d\tAdded: %d\tQueued: %d",
+					scannedCount.Load(), addedCount.Load(), queuedCount.Load())
+			case <-stopStats:
+				return
+			}
+		}
+	}()
+
 	var workers sync.WaitGroup
-	for range numWorkers {
+	for i := 0; i < numWorkers; i++ {
 		workers.Add(1)
 		go func() {
 			defer workers.Done()
 			for j := range jobs {
+				scannedCount.Add(1)
+				queuedCount.Add(-1)
+
 				if j.depth >= maxDepth {
 					tasks.Done()
 					continue
@@ -93,6 +118,8 @@ func buildSitemap(startURL string, maxDepth int) ([]string, error) {
 							mu.Lock()
 							finalURLs = append(finalURLs, abs)
 							mu.Unlock()
+							addedCount.Add(1)
+							queuedCount.Add(1)
 							tasks.Add(1)
 							jobs <- job{url: abs, depth: j.depth + 1}
 						}
@@ -104,19 +131,23 @@ func buildSitemap(startURL string, maxDepth int) ([]string, error) {
 		}()
 	}
 
-	// Kick off the first job
+	// Kick off first job
 	tasks.Add(1)
+	queuedCount.Add(1)
 	go func() {
 		jobs <- job{url: startURL, depth: 0}
 	}()
 
-	// Close jobs channel when all tasks are done
+	// Close jobs once all tasks are done
 	go func() {
 		tasks.Wait()
 		close(jobs)
 	}()
 
 	workers.Wait()
+	close(stopStats)
+	fmt.Println()
+
 	return finalURLs, nil
 }
 
