@@ -90,6 +90,11 @@ func buildSitemap(startURL string, maxDepth int, numWorkers int, showStats bool)
 	var mu sync.Mutex
 	finalURLs := []string{}
 
+	_, err := url.ParseRequestURI(startURL)
+	if err != nil {
+		return nil, fmt.Errorf("invalid start URL %s: %w", startURL, err)
+	}
+
 	visited.Store(startURL, true)
 	mu.Lock()
 	finalURLs = append(finalURLs, startURL)
@@ -135,21 +140,16 @@ func buildSitemap(startURL string, maxDepth int, numWorkers int, showStats bool)
 
 				foundLinks, err := getAndParseLinks(j.url)
 				if err != nil {
-					if !strings.Contains(err.Error(), "content type is not HTML") && !strings.Contains(err.Error(),
-						"received non-2xx status code") {
+					if !strings.Contains(err.Error(), "content type is not HTML") && !strings.Contains(err.Error(), "received non-2xx status code") {
 						log.Printf("Warning (URL: %s): %v", j.url, err)
 					}
 					tasks.Done()
 					continue
 				}
 
-				if j.depth+1 >= maxDepth {
-					tasks.Done()
-					continue
-				}
-
 				base := getBaseURL(j.url)
 				if base == nil {
+					log.Printf("Warning: Could not get base URL for %s", j.url)
 					tasks.Done()
 					continue
 				}
@@ -160,22 +160,37 @@ func buildSitemap(startURL string, maxDepth int, numWorkers int, showStats bool)
 						continue
 					}
 
-					parsedAbs, err := url.Parse(abs)
-					if err != nil {
-						continue
-					}
-					ext := strings.ToLower(path.Ext(parsedAbs.Path))
-					if _, ignore := ignoredExtensions[ext]; ignore && ext != "" {
-						skippedExtCount.Add(1)
+					if !isSameDomain(startURL, abs) {
 						continue
 					}
 
-					if isSameDomain(startURL, abs) {
-						if _, loaded := visited.LoadOrStore(abs, true); !loaded {
-							mu.Lock()
-							finalURLs = append(finalURLs, abs)
-							mu.Unlock()
-							addedCount.Add(1)
+					if _, loaded := visited.LoadOrStore(abs, true); !loaded {
+						mu.Lock()
+						finalURLs = append(finalURLs, abs)
+						mu.Unlock()
+						addedCount.Add(1)
+
+						shouldQueue := true // don't parse non-html pages
+
+						if j.depth+1 >= maxDepth {
+							shouldQueue = false
+						}
+
+						if shouldQueue {
+							parsedAbs, err := url.Parse(abs)
+							if err != nil {
+								log.Printf("Warning: Could not parse URL %s to check extension: %v", abs, err)
+								shouldQueue = false
+							} else {
+								ext := strings.ToLower(path.Ext(parsedAbs.Path))
+								if _, ignore := ignoredExtensions[ext]; ignore && ext != "" {
+									shouldQueue = false
+									skippedExtCount.Add(1)
+								}
+							}
+						}
+
+						if shouldQueue {
 							tasks.Add(1)
 							queuedCount.Add(1)
 							jobs <- job{url: abs, depth: j.depth + 1}
@@ -188,11 +203,15 @@ func buildSitemap(startURL string, maxDepth int, numWorkers int, showStats bool)
 		}(i)
 	}
 
-	tasks.Add(1)
-	queuedCount.Add(1)
-	go func() {
-		jobs <- job{url: startURL, depth: 0}
-	}()
+	if maxDepth > 0 {
+		tasks.Add(1)
+		queuedCount.Add(1)
+		go func() {
+			jobs <- job{url: startURL, depth: 0}
+		}()
+	} else {
+		log.Println("Max depth is 0, only including the start URL.")
+	}
 
 	go func() {
 		tasks.Wait()
