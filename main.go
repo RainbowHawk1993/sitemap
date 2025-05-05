@@ -38,14 +38,28 @@ var ignoredExtensions = map[string]struct{}{
 }
 
 func main() {
-	urlFlag := flag.String("url", "https://gobyexample.com/", "The URL to build a sitemap for.")
+	urlFlag := flag.String("url", "", "The URL to build a sitemap for. (Required)")
 	maxDepth := flag.Int("depth", 3, "The maximum depth to traverse.")
+	workersFlag := flag.Int("workers", 10, "Number of concurrent workers.")
+	statsFlag := flag.Bool("stats", false, "Show periodic crawling stats.")
+
+	flag.Usage = func() {
+		fmt.Fprintf(os.Stderr, "Usage: go run main.go --url <your-starting-url> [options]\n")
+		fmt.Fprintln(os.Stderr, "Options:")
+		flag.PrintDefaults()
+	}
+
 	flag.Parse()
 
 	if *urlFlag == "" {
-		fmt.Println("Usage: go run main.go --url <your-starting-url>")
-		log.Fatal("Error: --url flag is required")
+		fmt.Fprintln(os.Stderr, "Error: --url flag is required.")
+		flag.Usage()
+		os.Exit(1)
 	}
+
+	log.SetOutput(os.Stderr)
+
+	log.Printf("Starting sitemap build for %s (depth: %d, workers: %d)\n", *urlFlag, *maxDepth, *workersFlag)
 
 	pages, err := buildSitemap(*urlFlag, *maxDepth, *workersFlag, *statsFlag)
 	if err != nil {

@@ -14,49 +14,38 @@ A command-line tool written in Go to generate XML sitemaps for websites by crawl
 *   Outputs the generated XML sitemap to standard output.
 
 ## Setup
-**Build the executable:**
 
-Compiles the code and creates an executable file in the current directory by running:
-```bash
-go build
-```
-*(If you haven't already, you might need to run `go mod tidy` first to download dependencies like `golang.org/x/net/html`)*
-
+You might need to run `go mod tidy` first to download dependencies like `golang.org/x/net/html`*
 
 ## Usage
 
-Run the compiled executable from your terminal, providing the starting URL via the `--url` flag. You can optionally specify the maximum crawl depth using the `--depth` flag (defaults to 3).
+Run the sitemap generator by specifying the starting URL. You can customize the crawl behavior with several optional flags:
+
+*   `--url <STARTING_URL>`: **(Required)** The website URL to start crawling from (e.g., `https://example.com/`).
+*   `--depth <MAX_DEPTH>`: (Optional) The maximum depth of links to follow relative to the starting URL. Defaults to `3`. A depth of 0 only includes the start URL, 1 includes the start URL and pages linked directly from it, etc.
+*   `--workers <N>`: (Optional) The number of concurrent workers (goroutines) used for fetching and parsing pages. Defaults to `10`. Increasing this *may* speed up crawling on sites with many pages, especially if network latency is high. Be mindful of the load this places on the target server.
+*   `--stats`: (Optional) If present, displays periodic progress statistics to standard error (`stderr`) during the crawl. This includes elapsed time, pages scanned, unique URLs added to the sitemap, approximate queue size, and URLs skipped due to non-HTML extensions.
+
+### Running the Tool
+
+**Using `go run` (without compiling):**
 
 ```bash
-./sitemap --url <STARTING_URL> [--depth <MAX_DEPTH>]
-```
+# Basic usage
+go run main.go --url https://example.com
 
-Or you can build sitemap without creating an executable by running:
-```bash
-go run main.go --url <STARTING_URL> [--depth <MAX_DEPTH>]
-```
+# Specify depth
+go run main.go --url https://example.com --depth 5
 
-## Arguments:
-`--url <STARTING_URL>`: (Required) The full URL of the website you want to build a sitemap for (e.g., https://example.com).
+# Increase concurrency
+go run main.go --url https://example.com --workers 20
 
-`--depth <MAX_DEPTH>`: (Optional) The maximum number of links deep to crawl from the starting URL. Defaults to 3. A depth of 0 means only the starting URL will be included.
+# Show progress statistics
+go run main.go --url https://example.com --stats
 
-
-## Examples:
-Crawl gobyexample.com up to 2 levels deep:
-```bash
-./sitemap-builder --url https://gobyexample.com --depth 2
-```
-
-Crawl a local development server (default depth 3):
-```bash
-./sitemap-builder --url http://localhost:8080
-```
-
-Save the output to a file:
-Since the output is printed to standard output, you can redirect it to a file:
-```bash
-./sitemap-builder --url https://example.com > sitemap.xml
+# Combine flags and redirect sitemap output to a file
+# (Stats will still appear in your terminal)
+go run main.go --url https://example.com --depth 4 --workers 15 --stats > sitemap.xml
 ```
 
 
