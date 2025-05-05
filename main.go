@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"sitemap/link"
 	"strings"
+	"sync"
 )
 
 // Define the XML structure for the sitemap
@@ -49,51 +50,73 @@ func main() {
 // buildSitemap crawls the website starting from startURL up to maxDepth
 // and returns a list of unique URLs found within the same domain.
 func buildSitemap(startURL string, maxDepth int) ([]string, error) {
-	queue := make(map[string]int)
-	visited := make(map[string]bool)
-
-	queue[startURL] = 0
-	visited[startURL] = true
-
-	finalURLs := []string{startURL}
-
-	for len(queue) > 0 {
-		var currentURL string
-		var currentDepth int
-
-		for u, d := range queue {
-			currentURL = u
-			currentDepth = d
-			break
-		}
-		delete(queue, currentURL)
-
-		if currentDepth >= maxDepth {
-			continue
-		}
-
-		foundLinks, err := getAndParseLinks(currentURL)
-		if err != nil {
-			log.Printf("Warning: Could not get/parse links for %s: %v", currentURL, err)
-			continue
-		}
-
-		base := getBaseURL(currentURL)
-		for _, link := range foundLinks {
-			absoluteURL := resolveURL(base, link)
-			if absoluteURL == "" {
-				continue
-			}
-
-			if isSameDomain(startURL, absoluteURL) && !visited[absoluteURL] {
-				visited[absoluteURL] = true
-				finalURLs = append(finalURLs, absoluteURL)
-				if currentDepth+1 < maxDepth {
-					queue[absoluteURL] = currentDepth + 1
-				}
-			}
-		}
+	type job struct {
+		url   string
+		depth int
 	}
+
+	const numWorkers = 10
+
+	jobs := make(chan job)
+	var tasks sync.WaitGroup
+	var visited sync.Map
+	var mu sync.Mutex
+	finalURLs := []string{startURL}
+	visited.Store(startURL, true)
+
+	var workers sync.WaitGroup
+	for range numWorkers {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			for j := range jobs {
+				if j.depth >= maxDepth {
+					tasks.Done()
+					continue
+				}
+
+				foundLinks, err := getAndParseLinks(j.url)
+				if err != nil {
+					log.Printf("Warning: %v", err)
+					tasks.Done()
+					continue
+				}
+
+				base := getBaseURL(j.url)
+				for _, l := range foundLinks {
+					abs := resolveURL(base, l)
+					if abs == "" {
+						continue
+					}
+					if isSameDomain(startURL, abs) {
+						if _, loaded := visited.LoadOrStore(abs, true); !loaded {
+							mu.Lock()
+							finalURLs = append(finalURLs, abs)
+							mu.Unlock()
+							tasks.Add(1)
+							jobs <- job{url: abs, depth: j.depth + 1}
+						}
+					}
+				}
+
+				tasks.Done()
+			}
+		}()
+	}
+
+	// Kick off the first job
+	tasks.Add(1)
+	go func() {
+		jobs <- job{url: startURL, depth: 0}
+	}()
+
+	// Close jobs channel when all tasks are done
+	go func() {
+		tasks.Wait()
+		close(jobs)
+	}()
+
+	workers.Wait()
 	return finalURLs, nil
 }
 
