@@ -7,6 +7,8 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"os"
+	"path"
 	"sitemap/link"
 	"strings"
 	"sync"
@@ -26,6 +28,15 @@ type urlset struct {
 	Xmlns string `xml:"xmlns,attr"`
 }
 
+var ignoredExtensions = map[string]struct{}{
+	".txt": {}, ".pdf": {}, ".doc": {}, ".docx": {}, ".xls": {}, ".xlsx": {},
+	".ppt": {}, ".pptx": {}, ".zip": {}, ".rar": {}, ".tar": {}, ".gz": {},
+	".jpg": {}, ".jpeg": {}, ".png": {}, ".gif": {}, ".bmp": {}, ".svg": {},
+	".ico": {}, ".webp": {}, ".mp3": {}, ".mp4": {}, ".avi": {}, ".mov": {},
+	".wmv": {}, ".flv": {}, ".css": {}, ".js": {}, ".json": {}, ".xml": {},
+	".rss": {}, ".atom": {}, ".webmanifest": {}, ".map": {},
+}
+
 func main() {
 	urlFlag := flag.String("url", "https://gobyexample.com/", "The URL to build a sitemap for.")
 	maxDepth := flag.Int("depth", 3, "The maximum depth to traverse.")
@@ -36,10 +47,12 @@ func main() {
 		log.Fatal("Error: --url flag is required")
 	}
 
-	pages, err := buildSitemap(*urlFlag, *maxDepth)
+	pages, err := buildSitemap(*urlFlag, *maxDepth, *workersFlag, *statsFlag)
 	if err != nil {
 		log.Fatalf("Error building sitemap for %s: %v", *urlFlag, err)
 	}
+
+	log.Printf("Finished crawling. Found %d unique pages.\n", len(pages))
 
 	xmlBytes, err := generateXMLSitemap(pages)
 	if err != nil {
@@ -51,76 +64,106 @@ func main() {
 
 // buildSitemap crawls the website starting from startURL up to maxDepth
 // and returns a list of unique URLs found within the same domain.
-func buildSitemap(startURL string, maxDepth int) ([]string, error) {
+func buildSitemap(startURL string, maxDepth int, numWorkers int, showStats bool) ([]string, error) {
 	type job struct {
 		url   string
 		depth int
 	}
 
-	const numWorkers = 10
-
-	jobs := make(chan job)
+	jobs := make(chan job, numWorkers)
 	var tasks sync.WaitGroup
 	var visited sync.Map
 	var mu sync.Mutex
-	finalURLs := []string{startURL}
+	finalURLs := []string{}
+
 	visited.Store(startURL, true)
+	mu.Lock()
+	finalURLs = append(finalURLs, startURL)
+	mu.Unlock()
 
 	var scannedCount atomic.Int64
 	var addedCount atomic.Int64
 	var queuedCount atomic.Int64
+	var skippedExtCount atomic.Int64
 
-	// Stats display goroutine
 	stopStats := make(chan struct{})
-	go func() {
-		ticker := time.NewTicker(1 * time.Second)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ticker.C:
-				fmt.Printf("\rScanned: %d\tAdded: %d\tQueued: %d",
-					scannedCount.Load(), addedCount.Load(), queuedCount.Load())
-			case <-stopStats:
-				return
+	if showStats {
+		go func() {
+			ticker := time.NewTicker(2 * time.Second)
+			defer ticker.Stop()
+			start := time.Now()
+			log.Println("Starting crawl...")
+			for {
+				select {
+				case <-ticker.C:
+					log.Printf("\rElapsed: %s | Scanned: %d | Added: %d | Queued: %d | Skipped (Ext): %d     ",
+						time.Since(start).Round(time.Second),
+						scannedCount.Load(),
+						addedCount.Load(),
+						queuedCount.Load(),
+						skippedExtCount.Load())
+				case <-stopStats:
+					log.Println("\rStats display finished.")
+					return
+				}
 			}
-		}
-	}()
+		}()
+	}
 
 	var workers sync.WaitGroup
-	for i := 0; i < numWorkers; i++ {
+	for i := range numWorkers {
 		workers.Add(1)
-		go func() {
+		go func(workerID int) {
 			defer workers.Done()
 			for j := range jobs {
 				scannedCount.Add(1)
 				queuedCount.Add(-1)
 
-				if j.depth >= maxDepth {
+				foundLinks, err := getAndParseLinks(j.url)
+				if err != nil {
+					if !strings.Contains(err.Error(), "content type is not HTML") && !strings.Contains(err.Error(),
+						"received non-2xx status code") {
+						log.Printf("Warning (URL: %s): %v", j.url, err)
+					}
 					tasks.Done()
 					continue
 				}
 
-				foundLinks, err := getAndParseLinks(j.url)
-				if err != nil {
-					log.Printf("Warning: %v", err)
+				if j.depth+1 >= maxDepth {
 					tasks.Done()
 					continue
 				}
 
 				base := getBaseURL(j.url)
+				if base == nil {
+					tasks.Done()
+					continue
+				}
+
 				for _, l := range foundLinks {
 					abs := resolveURL(base, l)
 					if abs == "" {
 						continue
 					}
+
+					parsedAbs, err := url.Parse(abs)
+					if err != nil {
+						continue
+					}
+					ext := strings.ToLower(path.Ext(parsedAbs.Path))
+					if _, ignore := ignoredExtensions[ext]; ignore && ext != "" {
+						skippedExtCount.Add(1)
+						continue
+					}
+
 					if isSameDomain(startURL, abs) {
 						if _, loaded := visited.LoadOrStore(abs, true); !loaded {
 							mu.Lock()
 							finalURLs = append(finalURLs, abs)
 							mu.Unlock()
 							addedCount.Add(1)
-							queuedCount.Add(1)
 							tasks.Add(1)
+							queuedCount.Add(1)
 							jobs <- job{url: abs, depth: j.depth + 1}
 						}
 					}
@@ -128,34 +171,38 @@ func buildSitemap(startURL string, maxDepth int) ([]string, error) {
 
 				tasks.Done()
 			}
-		}()
+		}(i)
 	}
 
-	// Kick off first job
 	tasks.Add(1)
 	queuedCount.Add(1)
 	go func() {
 		jobs <- job{url: startURL, depth: 0}
 	}()
 
-	// Close jobs once all tasks are done
 	go func() {
 		tasks.Wait()
 		close(jobs)
 	}()
 
 	workers.Wait()
-	close(stopStats)
-	fmt.Println()
+	if showStats {
+		close(stopStats)
+		time.Sleep(50 * time.Millisecond)
+	}
+	log.Println("\rAll workers finished.")
 
 	return finalURLs, nil
 }
 
 // getAndParseLinks fetches a URL, reads its body, and parses links.
 func getAndParseLinks(urlStr string) ([]link.Link, error) {
-	resp, err := http.Get(urlStr)
+	client := http.Client{
+		Timeout: 15 * time.Second,
+	}
+	resp, err := client.Get(urlStr)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get URL %s: %w", urlStr, err)
+		return nil, fmt.Errorf("failed to GET URL %s: %w", urlStr, err)
 	}
 	defer resp.Body.Close()
 
@@ -179,7 +226,6 @@ func getAndParseLinks(urlStr string) ([]link.Link, error) {
 func getBaseURL(urlStr string) *url.URL {
 	parsedURL, err := url.Parse(urlStr)
 	if err != nil {
-		log.Printf("Warning: could not parse url %s: %v", urlStr, err)
 		return nil
 	}
 	return parsedURL
@@ -191,20 +237,40 @@ func resolveURL(base *url.URL, link link.Link) string {
 	if base == nil || link.Href == "" {
 		return ""
 	}
-	if strings.HasPrefix(link.Href, "#") || strings.HasPrefix(strings.ToLower(link.Href), "mailto:") || strings.HasPrefix(strings.ToLower(link.Href), "javascript:") || strings.HasPrefix(strings.ToLower(link.Href), "tel:") {
+	lowerHref := strings.ToLower(link.Href)
+	if strings.HasPrefix(link.Href, "//") {
+		newUrl := *base
+		newUrl.Host = ""
+		newUrl.Path = ""
+		newUrl.RawQuery = ""
+		newUrl.User = nil
+		newUrl.Opaque = link.Href
+		relUrl, err := url.Parse(newUrl.String())
+		if err != nil {
+			return ""
+		}
+		link.Href = relUrl.String()
+	} else if strings.HasPrefix(lowerHref, "#") ||
+		strings.HasPrefix(lowerHref, "mailto:") ||
+		strings.HasPrefix(lowerHref, "javascript:") ||
+		strings.HasPrefix(lowerHref, "tel:") ||
+		strings.HasPrefix(lowerHref, "data:") ||
+		(strings.Contains(lowerHref, ":") && !strings.HasPrefix(lowerHref, "http:") && !strings.HasPrefix(lowerHref, "https:")) {
 		return ""
 	}
 
 	relativeURL, err := url.Parse(link.Href)
 	if err != nil {
-		log.Printf("Warning: could not parse relative link %s: %v", link.Href, err)
 		return ""
 	}
 
 	absoluteURL := base.ResolveReference(relativeURL)
 
+	if absoluteURL.Scheme != "http" && absoluteURL.Scheme != "https" {
+		return ""
+	}
+
 	absoluteURL.Fragment = ""
-	// absoluteURL.Path = strings.TrimSuffix(absoluteURL.Path, "/")
 
 	return absoluteURL.String()
 }
@@ -213,15 +279,14 @@ func resolveURL(base *url.URL, link link.Link) string {
 func isSameDomain(startURLStr, targetURLStr string) bool {
 	start, err := url.Parse(startURLStr)
 	if err != nil {
-		log.Printf("Warning: could not parse start url %s: %v", startURLStr, err)
 		return false
 	}
 	target, err := url.Parse(targetURLStr)
 	if err != nil {
-		log.Printf("Warning: could not parse target url %s: %v", targetURLStr, err)
 		return false
 	}
-	return start.Host == target.Host
+
+	return strings.EqualFold(start.Host, target.Host)
 }
 
 // generateXMLSitemap creates the sitemap XML structure.
@@ -229,8 +294,18 @@ func generateXMLSitemap(pages []string) ([]byte, error) {
 	toXML := urlset{
 		Xmlns: xmlns,
 	}
+	addedUrls := make(map[string]struct{})
+
 	for _, page := range pages {
-		toXML.Urls = append(toXML.Urls, loc{page})
+		if _, err := url.ParseRequestURI(page); err != nil {
+			log.Printf("Warning: Skipping invalid URL for XML sitemap: %s (%v)", page, err)
+			continue
+		}
+
+		if _, exists := addedUrls[page]; !exists {
+			toXML.Urls = append(toXML.Urls, loc{page})
+			addedUrls[page] = struct{}{}
+		}
 	}
 
 	xmlBytes, err := xml.MarshalIndent(toXML, "", "  ")

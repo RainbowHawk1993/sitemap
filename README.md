@@ -79,7 +79,6 @@ Since the output is printed to standard output, you can redirect it to a file:
 
 ## Potential Improvements
 - Respect robots.txt rules.
-- Add concurrency/parallel fetching for faster crawling.
 - Implement rate limiting or delays between requests to be polite to servers.
 - Add support for `<lastmod>`, `<changefreq>`, and `<priority>` tags in the sitemap XML.
 - More sophisticated error handling (e.g., retries, handling specific HTTP errors).
